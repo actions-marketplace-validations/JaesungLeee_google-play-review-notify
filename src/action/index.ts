@@ -88,6 +88,9 @@ export function buildConfigInput(): ConfigInput {
   if (added.length && !(cfg.defaultChannels && cfg.defaultChannels.length))
     cfg.defaultChannels = added;
 
+  const language = input('language');
+  if (language) cfg.language = language as ConfigInput['language'];
+
   const store = input('state-store') ?? (cfg.stateStore ? undefined : 'github-cache');
   if (store === 'github-cache') cfg.stateStore = { type: 'github-cache' };
   else if (store === 'file') cfg.stateStore = { type: 'file' };
@@ -97,11 +100,13 @@ export function buildConfigInput(): ConfigInput {
 }
 
 async function main(): Promise<void> {
-  const config = parseConfig(buildConfigInput());
+  const config = parseConfig(buildConfigInput(), process.env, {
+    onWarning: (w) => core.warning(w),
+  });
   const log = actionLogger(collectSecrets(config));
   const dryRun = core.getBooleanInput('dry-run');
 
-  const sources = createSources(config, log, { version: VERSION });
+  const sources = createSources(config, log);
   const emit = input('emit-event');
   if (emit) {
     const parsed = JSON.parse(emit) as Partial<ReviewEvent> & {

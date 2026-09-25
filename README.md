@@ -1,6 +1,7 @@
 # google-play-review-notify
 
 [![CI](https://github.com/JaesungLeee/google-play-review-notify/actions/workflows/ci.yml/badge.svg)](https://github.com/JaesungLeee/google-play-review-notify/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/JaesungLeee/google-play-review-notify/actions/workflows/codeql.yml/badge.svg)](https://github.com/JaesungLeee/google-play-review-notify/actions/workflows/codeql.yml)
 [![npm](https://img.shields.io/npm/v/play-review-notify)](https://www.npmjs.com/package/play-review-notify)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -12,34 +13,37 @@ server, and works for any app in any Play Console account.
 
 ## Why this exists
 
-Google Play tells you about review outcomes in exactly two places: the Play Console UI and the
-developer account's inbox. There is no webhook, and the Publishing API has no "in review /
-approved / rejected" state. This tool watches the signals that _do_ exist and turns them into
-normalized events:
+Google Play has no webhook for review outcomes. The Play Developer API does expose the review
+state of each release (`applications.tracks.releases.list`, `releaseLifecycleState`), and the
+developer inbox carries what the API leaves out: policy warnings and the reason for a rejection.
+This tool polls both and turns them into normalized events:
 
-| Event            | Detected from                                   | How                                                                                                   |
-| ---------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `REJECTED`       | Gmail (Play Console policy email)               | Body line `App Status: Rejected` / `앱 상태: 거부됨`; the reason is extracted                         |
-| `POLICY_WARNING` | Gmail                                           | "Action required" notices with a deadline, target API level warnings                                  |
-| `SUBMITTED`      | Play Developer API                              | A new versionCode appears on a configured track                                                       |
-| `LIVE`           | Public store listing                            | The listing goes from 404 to 200 (first release) or its "Updated on" date changes                     |
-| `REMOVED`, `SUSPENDED`, `APPROVED` | Gmail                         | Rule sets exist but are unverified drafts: Google normally sends **no approval email** for updates    |
-| `UNKNOWN_NOTICE` | Gmail                                           | A Play email the rules could not classify (off by default; turn on to catch new email formats)        |
+| Event                | Detected from      | How                                                                                             |
+| -------------------- | ------------------ | ----------------------------------------------------------------------------------------------- |
+| `PENDING_SUBMISSION` | Play Developer API | A release is created but not yet sent for review (off by default)                               |
+| `SUBMITTED`          | Play Developer API | The release enters review (off by default)                                                      |
+| `APPROVED`           | Play Developer API | The release passed review and waits for you to press Publish (managed publishing)               |
+| `REJECTED`           | Play Developer API | The release was not approved. The Play Console email then adds the reason as a follow-up        |
+| `LIVE`               | Play Developer API | The release is available to users on its track, production or not                               |
+| `POLICY_WARNING`     | Gmail              | "Action required" notices with a deadline, target API level warnings                            |
 
 Everything is idempotent: each event has a stable id, state is persisted between runs, and the
 first run only records a baseline without notifying.
 
-> The detection rules were validated against real Play Console emails and Play API responses.
-> The resulting decision table and known limits, including managed publishing, are in
-> [docs/design.md](docs/design.md#what-each-signal-can-and-cannot-say).
+> The transition table behind the API events and the email rules are in
+> [docs/design.md](docs/design.md#what-each-signal-can-and-cannot-say). The release lifecycle
+> endpoint is new (spring 2026); its edge cases are still being confirmed on real accounts and are
+> listed there.
 
 ## Quick start: GitHub Action
 
-1. Create the three Gmail secrets by following [docs/gmail-oauth.md](docs/gmail-oauth.md)
-   (one-time, about 10 minutes). Optionally add a Play service account with
-   [docs/play-api-setup.md](docs/play-api-setup.md) to get `SUBMITTED` events.
-2. Add `play-review-notify.yml` to your repository (start from
-   [examples/play-review-notify.yml](examples/play-review-notify.yml)).
+1. Create a Play service account with [docs/play-api-setup.md](docs/play-api-setup.md)
+   (read-only, about 10 minutes): it provides the release events. Optionally add the three Gmail
+   secrets by following [docs/gmail-oauth.md](docs/gmail-oauth.md) for policy warnings and
+   rejection reasons.
+2. Add `play-review-notify.yml` to your repository. `npx play-review-notify init` writes it and
+   the workflow below after a few questions; or start from
+   [examples/play-review-notify.yml](examples/play-review-notify.yml).
 3. Add a workflow:
 
 ```yaml
@@ -73,6 +77,9 @@ Or call the reusable workflow, which bundles the permissions, checkout and the A
 ```yaml
 jobs:
   notify:
+    permissions:
+      contents: read
+      actions: write # a called workflow cannot request more than the caller grants
     uses: JaesungLeee/google-play-review-notify/.github/workflows/notify.yml@v1
     with:
       config-path: play-review-notify.yml
@@ -81,7 +88,7 @@ jobs:
 
 The Action also accepts the main settings as inputs when you do not want a config file
 (`packages`, `gmail-*`, `play-service-account-json`, `slack-webhook-url`, `discord-webhook-url`,
-`webhook-url`, `webhook-secret`, `state-store`, `dry-run`, `emit-event`) and exposes `events`,
+`webhook-url`, `webhook-secret`, `language`, `state-store`, `dry-run`, `emit-event`) and exposes `events`,
 `events-count`, and `has-rejection` as outputs for later steps. See [action.yml](action.yml).
 
 GitHub's schedule trigger runs at most every 5 minutes and may be delayed. If you need faster
@@ -91,7 +98,7 @@ delivery, run the CLI from a cron job.
 
 ```bash
 npm i -g play-review-notify                       # or use npx play-review-notify ...
-cp examples/play-review-notify.yml play-review-notify.yml   # edit apps and channels
+play-review-notify init                            # asks a few questions, writes play-review-notify.yml
 
 export GMAIL_CLIENT_ID=... GMAIL_CLIENT_SECRET=... # docs/gmail-oauth.md
 play-review-notify auth gmail                      # browser consent → prints GMAIL_REFRESH_TOKEN
@@ -108,21 +115,39 @@ Schedule Trigger; state lives in `.play-review-notify/state.json` by default.
 
 | Command               | Purpose                                                            |
 | --------------------- | ------------------------------------------------------------------ |
+| `init`                | Generate the config (and a GitHub workflow) from a few questions   |
 | `run`                 | Poll all enabled sources once, notify, save state, exit            |
 | `auth gmail`          | One-time OAuth flow that prints a `gmail.readonly` refresh token   |
 | `doctor`              | Check config, credentials, sources, channels and state, with fixes |
 | `test-notify`         | Send a sample event to the configured channels                     |
 | `emit`                | Emit an event from a pipeline, e.g. `SUBMITTED` right after upload |
 | `state show \| reset` | Inspect or clear the persisted state                               |
+| `lang [en\|ko]`       | Show or save the output language used by every command             |
 
 Exit codes: `0` ok, `1` configuration or auth error, `2` a source failed (notifications still
 sent), `3` a notification failed. `--json` switches to structured output.
+
+**Language.** The first time you run the CLI in a terminal it asks whether to continue in English
+or Korean (Enter picks the system locale's language) and saves the answer in
+`~/.config/play-review-notify/preferences.json` (`$XDG_CONFIG_HOME` or `%APPDATA%` when set), so
+every later command, including cron jobs run as the same user, uses that language without asking.
+`play-review-notify lang` shows the language in effect and where it came from, `lang en|ko` saves a
+new one, and `lang --reset` forgets it. `--lang en|ko` overrides a single run and
+`PLAY_REVIEW_NOTIFY_LANG` overrides the saved language for scripts. Without a saved language there
+is no question outside a terminal, with `--json`, or with `--version`, and the output is English.
+Generated files, JSON output, and core log lines stay English in every language.
 
 ## Configuration
 
 Secrets are never written to the file; use `${ENV_VAR}` references.
 
+A JSON Schema is published at
+[schemas/config.schema.json](schemas/config.schema.json). Put this comment on the first line of
+your YAML to get completion, hover help, and typo checks in VS Code (with the YAML extension),
+JetBrains IDEs, and other editors that honour it:
+
 ```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/JaesungLeee/google-play-review-notify/main/schemas/config.schema.json
 version: 1
 
 apps:
@@ -144,15 +169,11 @@ sources:
   playApi:
     enabled: true
     serviceAccountJson: ${PLAY_SERVICE_ACCOUNT_JSON}
-  storeListing:
-    enabled: true
-    locale: en
-    country: US
 
-events: # defaults: everything on except SUBMITTED and UNKNOWN_NOTICE
-  REJECTED: { enabled: true, mentions: ['<!channel>'] }
+events: # defaults: everything on except PENDING_SUBMISSION and SUBMITTED
+  REJECTED: { enabled: true, mentions: ['<!channel>'], reasonFollowUp: true }
   SUBMITTED: { enabled: true }
-  LIVE: { enabled: true, mergeInto: APPROVED }
+  LIVE: { enabled: true, mergeInto: APPROVED } # one message per release instead of approved + live
 
 channels:
   release-slack: { type: slack, webhookUrl: ${SLACK_WEBHOOK_URL} }
@@ -164,6 +185,7 @@ channels:
     batch: false
 defaultChannels: [release-slack]
 
+language: en # en | ko: language of the built-in notification text (titles, body, field labels)
 templates: # Mustache-style overrides per event type
   REJECTED: |
     :x: *{{appName}}* ({{packageName}}) v{{versionName}} was rejected.
@@ -181,22 +203,33 @@ maxRetries: 3
 - **Channels**: `slack` (Incoming Webhook, Block Kit), `discord` (webhook embed), `webhook`
   (JSON payload with `X-Play-Review-Event`, `X-Play-Review-Timestamp`, and
   `X-Play-Review-Signature: sha256=HMAC(secret, timestamp + "." + body)` headers; `batch: true`
-  sends one array per run).
+  sends one array per run). The payload is described by
+  [schemas/webhook-payload.schema.json](schemas/webhook-payload.schema.json); importable n8n
+  workflows are in [examples/n8n](examples/n8n/README.md).
 - **State stores**: `file` (CLI default), `github-cache` (Action default; entries expire after 7
   days without access, which is fine for any schedule shorter than that), `none` (lookback window
   only), `custom` (a local module exporting a `StateStore`).
-- **Templates** receive every event field plus `app.*` from the config.
+- **Language**: `language: ko` switches the built-in titles, body, and field labels of every
+  notification to Korean (default `en`). It is a project setting, separate from the CLI's own
+  language, because notifications go to a shared channel. Rejection reasons are quoted from the
+  Play Console email and follow the console's language.
+- **Templates** receive every event field plus `app.*` from the config and are used as-is in any
+  language.
 
 ## How the signals work, honestly
 
-- **Rejections** always arrive by email from `no-reply-googleplay-developer@google.com`. The subject
-  is the same for rejections and deadline warnings, so classification uses the body.
-- **Approval** of an update produces no email. The Play Developer API reports a release as
-  `completed` the moment it is submitted, even while it is under review. The only proof that a
-  release reached users is the public store page, which is what the `storeListing` source watches.
-  This only covers the production track.
-- **Managed publishing**: the store page changes only after you press "Publish", so the
-  "approved, waiting to publish" moment is not observable by any source.
+- **Release states** come from `applications.tracks.releases.list`, whose
+  `releaseLifecycleState` moves through `NOT_SENT_FOR_REVIEW → IN_REVIEW → APPROVED_NOT_PUBLISHED
+  | NOT_APPROVED → PUBLISHED`. The adapter remembers the last state of every release and emits one
+  event per state entered. Polling runs every few minutes, so a transition can be skipped: a
+  release seen `IN_REVIEW` and next `PUBLISHED` produces `APPROVED` and `LIVE` together.
+- **Managed publishing on**: `APPROVED` fires when the release reaches "Ready to publish";
+  `LIVE` fires after you press Publish. **Off**: approval publishes immediately, so both usually
+  arrive in the same run (merge them with `LIVE: { mergeInto: APPROVED }` if one message is enough).
+- **Rejections** are reported by the API without a reason. The reason arrives by email from
+  `no-reply-googleplay-developer@google.com`, usually minutes later, and is sent as a follow-up
+  to the same rejection (`reasonFollowUp: false` turns that off). The subject is the same for
+  rejections and deadline warnings, so classification uses the body.
 - **Email language** follows your Play Console language. Rule sets ship for English and Korean;
   contributions for other languages are welcome (see below).
 
@@ -211,8 +244,9 @@ maxRetries: 3
 ## Contributing
 
 Bug reports, new email formats, and rule sets for other languages are the most valuable
-contributions. If a Play email was not classified, enable `UNKNOWN_NOTICE` to see it, then open a
-"Unrecognized Play email" issue with the masked subject and body. See
+contributions. If a Play email was not classified, run with `--verbose` (unmatched emails are
+logged with their subject), then open a "Unrecognized Play email" issue with the masked subject
+and body. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and how rule sets are tested.
 
 Security issues: see [SECURITY.md](SECURITY.md). Please do not open public issues for them.
@@ -222,10 +256,8 @@ Security issues: see [SECURITY.md](SECURITY.md). Please do not open public issue
 - Gmail access uses the read-only scope `gmail.readonly` only. Emails are never stored; the state
   file keeps message ids and a timestamp, and notifications contain only the extracted fields
   (app, version, reason capped at `reasonMaxLength`).
-- The Play service account needs only "View app information (read-only)". The read-only edit that
-  is opened to list tracks is always discarded.
-- The store listing source makes one unauthenticated request per app per run with an explicit
-  User-Agent.
+- The Play service account needs only "View app information (read-only)". Only
+  `applications.tracks.releases.list` is called; no edit is ever opened.
 - Secrets referenced in the config are redacted from logs.
 
 ## Development

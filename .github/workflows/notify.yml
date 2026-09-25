@@ -2,6 +2,7 @@
 #
 #   jobs:
 #     notify:
+#       permissions: { contents: read, actions: write }   # required: callers must grant them
 #       uses: JaesungLeee/google-play-review-notify/.github/workflows/notify.yml@v1
 #       with:
 #         config-path: play-review-notify.yml
@@ -77,7 +78,7 @@ jobs:
       events-count: ${{ steps.notify.outputs.events-count }}
       has-rejection: ${{ steps.notify.outputs.has-rejection }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: notify
         uses: JaesungLeee/google-play-review-notify@v1
         with:

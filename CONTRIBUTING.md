@@ -29,8 +29,8 @@ when you change anything under `src/` or `rules/`.
 
 ## Reporting an unrecognized Play email
 
-1. Enable `UNKNOWN_NOTICE` in your config so the email surfaces as an event, or find it in Gmail
-   with `from:google.com "Google Play"`.
+1. Run with `--verbose`: emails from Google Play that match no rule are logged with their
+   subject. Or find it in Gmail with `from:google.com "Google Play"`.
 2. Open the email in Gmail → ⋮ → **Show original** → **Download original** to get the `.eml`.
 3. Mask before sharing: replace the developer name, app names, package names, URLs to your
    servers, and the recipient address with placeholders such as `Sample Team`, `Sample App`,
@@ -94,14 +94,26 @@ Wire new implementations in `src/sources/index.ts`, `src/notifiers/index.ts`, or
 `src/state/index.ts`, extend the zod config schema in `src/core/config.ts`, and add tests that
 inject fakes (see `test/sources/*.test.ts` for the pattern; no network in tests).
 
+After changing `src/core/config.ts`, run `npm run schema` and commit the regenerated
+`schemas/config.schema.json`; give new fields a `.describe()` so editors can show help text. CI
+and `test/core/schema.test.ts` fail when the file is stale.
+
 ## Pull requests
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/) in the title
-  (`feat(email): ...`, `fix(store-listing): ...`, `docs: ...`). Changelog entries are derived
+  (`feat(email): ...`, `fix(play-api): ...`, `docs: ...`). Changelog entries are derived
   from them.
 - Keep the PR focused; documentation updates that describe the change belong in the same PR.
 - Do not edit `CHANGELOG.md` or bump the version: both are generated from the commit titles
   by Release Please (see below).
+
+## Dependencies (maintainers)
+
+Dependabot opens grouped pull requests every Monday. Runtime dependency bumps are titled
+`fix(deps)` so merging one produces a patch release; development and Actions bumps are `chore`
+and `ci` and do not. Review the CI result, merge, and let Release Please do the rest. Security
+advisories for runtime dependencies should be merged promptly; CodeQL runs on every pull request
+and weekly.
 
 ## Releasing (maintainers)
 
